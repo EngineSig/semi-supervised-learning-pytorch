@@ -18,6 +18,7 @@ import torchvision.datasets as datasets
 
 import preresnet_sd_cifar as preresnet_cifar
 import wideresnet
+import Resnet
 import pdb
 import bisect
 
@@ -70,13 +71,16 @@ os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"]=str(args.gpu)
 
 best_prec1 = 0
-best_test_prec1 = 0
 acc1_tr, losses_tr = [], []
 losses_cl_tr = []
 acc1_val, losses_val, losses_et_val = [], [], []
 acc1_test, losses_test, losses_et_test = [], [], []
 acc1_t_tr, acc1_t_val, acc1_t_test = [], [], []
 learning_rate, weights_cl = [], []
+
+train_dir ='/home/users/haowenli/data_street_clean/street_clean_spatial_softlink/street_clean/original_street_5_sup_4000/train_5/supervised'
+test_dir='/home/users/haowenli/data_street_clean/street_clean_spatial_softlink/street_clean/original_all_street_5/test_5'
+unsup_dir ='/home/users/haowenli/data_street_clean/street_clean_spatial_softlink/street_clean/original_all_street_5/train_5/unsupervised'
 
 def main():
     global args, best_prec1, best_test_prec1
@@ -86,7 +90,7 @@ def main():
     global acc1_test, losses_test, losses_et_test
     global weights_cl
     args = parser.parse_args()
-    print args
+    print (args)
     if args.dataset == 'svhn':
         drop_rate=0.3
         widen_factor=3
@@ -101,6 +105,8 @@ def main():
     elif args.arch == 'wideresnet':
         print("Model: %s"%args.arch)
         model = wideresnet.WideResNet(28, args.num_classes, widen_factor=widen_factor, dropRate=drop_rate, leakyRate=0.1)
+    elif args.arch == 'Resnet':
+        model = Resnet.ResNet(num_classes=args.num_classes)
     else:
         assert(False)
     
@@ -110,8 +116,8 @@ def main():
         model_teacher = torch.nn.DataParallel(model_teacher).cuda()
 
     model = torch.nn.DataParallel(model).cuda()
-    print model
-    
+    print (model)
+
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
@@ -144,8 +150,7 @@ def main():
     # Data loading code
     if args.dataset == 'cifar10':
         dataloader = cifar.CIFAR10
-        num_classes = 10
-        data_dir = '/tmp/'
+        num_classes = 5
  
         normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
                                          std=[0.2023, 0.1994, 0.2010])
@@ -159,28 +164,28 @@ def main():
         transform_test = transforms.Compose([
             transforms.ToTensor(),
             normalize,
-        ])    
+        ])
 
     elif args.dataset == 'cifar10_zca':
         dataloader = cifar_zca.CIFAR10
         num_classes = 10
         data_dir = 'cifar10_zca/cifar10_gcn_zca_v2.npz'
 
-        # transform is implemented inside zca dataloader 
+        # transform is implemented inside zca dataloader
         transform_train = transforms.Compose([
             transforms.ToTensor(),
         ])
- 
+
         transform_test = transforms.Compose([
             transforms.ToTensor(),
         ])
 
-     
+
     elif args.dataset == 'svhn':
         dataloader = svhn.SVHN
         num_classes = 10
         data_dir = '/tmp/'
- 
+
         normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5],
                                          std=[0.5, 0.5, 0.5])
         transform_train = transforms.Compose([
@@ -188,15 +193,15 @@ def main():
             transforms.ToTensor(),
             normalize,
         ])
- 
+
         transform_test = transforms.Compose([
             transforms.ToTensor(),
             normalize,
-        ])    
+        ])
 
-   
-    labelset = dataloader(root=data_dir, split='label', download=True, transform=transform_train, boundary=args.boundary)
-    unlabelset = dataloader(root=data_dir, split='unlabel', download=True, transform=transform_train, boundary=args.boundary)
+
+    labelset = dataloader(root=train_dir, split='label', download=False, transform=transform_train, boundary=args.boundary)
+    unlabelset = dataloader(root=unsup_dir, split='unlabel', download=False, transform=transform_train, boundary=args.boundary)
     batch_size_label = args.batch_size//2
     batch_size_unlabel = args.batch_size//2
     if args.model == 'baseline': batch_size_label=args.batch_size
@@ -206,32 +211,23 @@ def main():
         shuffle=True, 
         num_workers=args.workers,
         pin_memory=True)
-    label_iter = iter(label_loader) 
 
     unlabel_loader = data.DataLoader(unlabelset, 
         batch_size=batch_size_unlabel, 
         shuffle=True, 
         num_workers=args.workers,
         pin_memory=True)
-    unlabel_iter = iter(unlabel_loader) 
 
     print("Batch size (label): ", batch_size_label)
     print("Batch size (unlabel): ", batch_size_unlabel)
 
-
-    validset = dataloader(root=data_dir, split='valid', download=True, transform=transform_test, boundary=args.boundary)
+    validset = dataloader(root=test_dir, split='valid', download=False, transform=transform_test, boundary=args.boundary)
     val_loader = data.DataLoader(validset, 
         batch_size=args.batch_size, 
         shuffle=False, 
         num_workers=args.workers,
         pin_memory=True)
 
-    testset = dataloader(root=data_dir, split='test', download=True, transform=transform_test)
-    test_loader = data.DataLoader(testset, 
-        batch_size=args.batch_size, 
-        shuffle=False, 
-        num_workers=args.workers,
-        pin_memory=True)
 
     # deifine loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss(size_average=False).cuda()
@@ -278,24 +274,22 @@ def main():
         
         # evaluate on validation set        
         prec1_val, loss_val = validate(val_loader, model, criterions, args, 'valid')
-        prec1_test, loss_test = validate(test_loader, model, criterions, args, 'test')
+
         if args.model=='mt':
             prec1_t_val, loss_t_val = validate(val_loader, model_teacher, criterions, args, 'valid')
-            prec1_t_test, loss_t_test = validate(test_loader, model_teacher, criterions, args, 'test')
 
         # append values
         acc1_tr.append(prec1_tr)
         losses_tr.append(loss_tr)
         acc1_val.append(prec1_val)
         losses_val.append(loss_val)
-        acc1_test.append(prec1_test)
-        losses_test.append(loss_test)
+
         if args.model != 'baseline': 
             losses_cl_tr.append(loss_cl_tr)
         if args.model=='mt':
             acc1_t_tr.append(prec1_t_tr)
             acc1_t_val.append(prec1_t_val)
-            acc1_t_test.append(prec1_t_test)
+
         weights_cl.append(weight_cl)
         learning_rate.append(lr)
 
@@ -329,23 +323,17 @@ def main():
             }
        
         else:
-            is_best = prec1_val > best_prec1
-            if is_best:
-                best_test_prec1 = prec1_test
-            print("Best test precision: %.3f"%best_test_prec1)
+            is_best = prec1_t_val > best_prec1
             best_prec1 = max(prec1_val, best_prec1)
             dict_checkpoint = {
                 'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
                 'best_prec1': best_prec1,
-                'best_test_prec1' : best_test_prec1,
                 'acc1_tr': acc1_tr,
                 'losses_tr': losses_tr,
                 'losses_cl_tr': losses_cl_tr,
                 'acc1_val': acc1_val,
                 'losses_val': losses_val,
-                'acc1_test' : acc1_test,
-                'losses_test' : losses_test,
                 'weights_cl' : weights_cl,
                 'learning_rate' : learning_rate,
             }
